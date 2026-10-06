@@ -30,6 +30,8 @@ def _write_children(children: list, lines: list[str], indent: int):
             attrs = ""
             if child.add_date:
                 attrs += f' ADD_DATE="{child.add_date}"'
+            if child.title.lower() in ("bookmarks bar", "bookmarks toolbar") or getattr(child, "personal_toolbar", False):
+                attrs += ' PERSONAL_TOOLBAR_FOLDER="true"'
             lines.append(f"{prefix}<DT><H3 FOLDED{attrs}>{_escape(child.title)}</H3>")
             lines.append(f"{prefix}<DL><p>")
             _write_children(child.children, lines, indent + 1)

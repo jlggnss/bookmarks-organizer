@@ -26,11 +26,12 @@ Rules:
 
 def organize_bookmarks(
     bookmarks: list[Bookmark],
-    client: OpenAI,
-    model: str,
+    client: OpenAI | Any,
+    model: str = "gemini-3.8-flash",
     max_categories: int = 20,
     batch_size: int = 10,
     existing_categories: list[str] | None = None,
+    suggested_categories: list[str] | None = None,
     progress_path: Path | None = None,
     start_index: int = 0,
     resumed_categories: dict[str, list[Bookmark]] | None = None,
@@ -40,11 +41,12 @@ def organize_bookmarks(
     
     Args:
         bookmarks: Full list of bookmarks to organize.
-        client: OpenAI client instance.
+        client: LLM client or OpenAI client instance.
         model: Model name to use.
         max_categories: Maximum number of categories to create.
         batch_size: Number of bookmarks per LLM call.
         existing_categories: Category names to reuse (from existing folders).
+        suggested_categories: User-defined preferred categories to prioritize.
         progress_path: Path to save progress file (enables stop/resume).
         start_index: Index to start from (for resuming).
         resumed_categories: Previously categorized bookmarks (for resuming).
@@ -53,13 +55,18 @@ def organize_bookmarks(
     """
     if existing_categories is None:
         existing_categories = []
+    if suggested_categories is None:
+        suggested_categories = []
+
+    # Merge suggested and existing categories as initial pool
+    initial_categories = list(dict.fromkeys(suggested_categories + existing_categories))
 
     categories: dict[str, list[Bookmark]] = resumed_categories or {}
 
     # Process in batches
     for i in range(start_index, len(bookmarks), batch_size):
         batch = bookmarks[i : i + batch_size]
-        current_cats = list(set(existing_categories + list(categories.keys())))
+        current_cats = list(dict.fromkeys(initial_categories + list(categories.keys())))
 
         batch_result = _categorize_batch(batch, client, model, max_categories, current_cats)
 
@@ -92,15 +99,24 @@ def _find_matching_category(name: str, categories: dict[str, list[Bookmark]]) ->
     return name
 
 
+from .llm_interface import LLMInterface
+
+
 def _categorize_batch(
     batch: list[Bookmark],
-    client: OpenAI,
+    client: Any,
     model: str,
     max_categories: int,
     existing_categories: list[str],
 ) -> dict[str, list[int]]:
     """Categorize a single batch of bookmarks. Returns category -> list of indices."""
-    
+    if isinstance(client, LLMInterface):
+        return client.categorize_batch(
+            batch=batch,
+            existing_categories=existing_categories,
+            max_categories=max_categories,
+        )
+
     bookmark_list = "\n".join(
         f"{i}. {b.title} — {b.url}" for i, b in enumerate(batch)
     )
@@ -181,19 +197,57 @@ Where the numbers are the bookmark indices from the list above. Every bookmark m
 def build_organized_tree(
     categories: dict[str, list[Bookmark]],
     protected_folders: list[Folder] | None = None,
+    root_folder_name: str | None = None,
 ) -> Folder:
-    """Build a Folder tree from categorized bookmarks and protected folders."""
+    """
+    Build a Folder tree from categorized bookmarks and protected folders.
+    If root_folder_name (e.g. 'Bookmarks bar') is specified, category folders
+    are placed inside that container, supporting slash-separated nested paths.
+    """
     root = Folder(title="Bookmarks")
 
-    # Add protected folders first
+    toolbar_container: Folder | None = None
+    if root_folder_name:
+        if protected_folders:
+            for f in protected_folders:
+                if f.title.lower() == root_folder_name.lower():
+                    toolbar_container = f
+                    break
+        if toolbar_container is None:
+            toolbar_container = Folder(title=root_folder_name)
+        root.children.append(toolbar_container)
+
+    # Add other protected folders
     if protected_folders:
         for folder in protected_folders:
+            if toolbar_container is not None and folder is toolbar_container:
+                continue
             root.children.append(folder)
 
-    # Add categorized folders
+    target_parent = toolbar_container if toolbar_container is not None else root
+
     for category_name, bookmarks in sorted(categories.items()):
-        folder = Folder(title=category_name)
-        folder.children = bookmarks
-        root.children.append(folder)
+        clean_cat = category_name.strip().strip("/")
+        if root_folder_name and clean_cat.lower().startswith(root_folder_name.lower() + "/"):
+            clean_cat = clean_cat[len(root_folder_name) + 1:].strip()
+
+        parts = [p.strip() for p in clean_cat.replace("\\", "/").split("/") if p.strip()]
+        if not parts:
+            parts = ["Uncategorized"]
+
+        current = target_parent
+        for part in parts:
+            existing = next(
+                (c for c in current.children if isinstance(c, Folder) and c.title.lower() == part.lower()),
+                None,
+            )
+            if existing:
+                current = existing
+            else:
+                new_f = Folder(title=part)
+                current.children.append(new_f)
+                current = new_f
+
+        current.children.extend(bookmarks)
 
     return root

@@ -75,12 +75,21 @@ def parse_bookmarks(html: str) -> Folder:
     return parser.root
 
 
-def extract_all_bookmarks(folder: Folder, protected_folders: list[str] | None = None) -> tuple[list[Bookmark], list[Folder]]:
+def extract_all_bookmarks(
+    folder: Folder,
+    protected_folders: list[str] | None = None,
+    preserve_toolbar: bool = False,
+) -> tuple[list[Bookmark], list[Folder]]:
     """
     Extract all bookmarks from the tree.
     
+    Args:
+        folder: Root or parent folder.
+        protected_folders: Folder titles to keep completely intact.
+        preserve_toolbar: If True, keeps direct bookmarks on 'Bookmarks bar' intact.
+    
     Returns:
-        - flat list of bookmarks (from non-protected folders)
+        - flat list of bookmarks (to organize)
         - list of protected folders (kept intact)
     """
     if protected_folders is None:
@@ -93,8 +102,18 @@ def extract_all_bookmarks(folder: Folder, protected_folders: list[str] | None = 
         if isinstance(child, Folder):
             if child.title in protected_folders:
                 protected.append(child)
+            elif preserve_toolbar and child.title.lower() in ("bookmarks bar", "bookmarks toolbar"):
+                direct_bms = [c for c in child.children if isinstance(c, Bookmark)]
+                sub_folders = [c for c in child.children if isinstance(c, Folder)]
+                if direct_bms:
+                    toolbar_copy = Folder(title=child.title, children=direct_bms, add_date=child.add_date)
+                    protected.append(toolbar_copy)
+                for sf in sub_folders:
+                    sub_bms, sub_prot = extract_all_bookmarks(sf, protected_folders, preserve_toolbar=preserve_toolbar)
+                    bookmarks.extend(sub_bms)
+                    protected.extend(sub_prot)
             else:
-                sub_bookmarks, sub_protected = extract_all_bookmarks(child, protected_folders)
+                sub_bookmarks, sub_protected = extract_all_bookmarks(child, protected_folders, preserve_toolbar=preserve_toolbar)
                 bookmarks.extend(sub_bookmarks)
                 protected.extend(sub_protected)
         elif isinstance(child, Bookmark):

@@ -2,9 +2,13 @@
 __pycache__/
 *.pyc
 *.pyo
+*.7z
 venv/
 .venv/
+.benchmarks/
+.archive/
 .pytest_cache/
 bookmarks*.html
+bookmarks*.xlsx
 progress.json
 .DS_Store

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bookmarks Organizer - Organize browser bookmarks using AI."""
+"""Bookmarks Organizer - Organize browser bookmarks using AI (Gemini or OpenAI) with Excel support."""
 
 import argparse
 import sys
@@ -7,33 +7,46 @@ from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
-from openai import OpenAI
 import os
 
 from src.parser import parse_bookmarks, extract_all_bookmarks, extract_uncategorized_bookmarks
 from src.organizer import organize_bookmarks, build_organized_tree
 from src.writer import write_bookmarks
 from src.progress import get_progress_path, load_progress, clear_progress
+from src.llm_factory import create_llm_client
+from src.excel import export_bookmarks_to_excel, import_bookmarks_from_excel
 
 
 def main():
     load_dotenv()
 
     parser = argparse.ArgumentParser(
-        description="Organize browser bookmarks into categories using AI.",
+        description="Organize browser bookmarks into categories using AI (Gemini or OpenAI) or manage via Excel.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
+  # Standard AI Organization (Gemini or OpenAI):
   python main.py bookmarks.html
+  python main.py bookmarks.html --provider gemini --model gemini-3.8-flash
   python main.py bookmarks.html -o organized.html
-  python main.py bookmarks.html --uncategorized-only
-  python main.py bookmarks.html --model gpt-4o --base-url https://openrouter.ai/api/v1
+  python main.py bookmarks.html --preserve-toolbar
+
+  # Excel Workflow (Clean in Excel before/after AI):
+  python main.py bookmarks.html --to-excel bookmarks.xlsx
+  python main.py bookmarks.xlsx -o bookmarks_cleaned.html --no-ai
+  python main.py bookmarks.xlsx -o bookmarks_organized.html --provider gemini
+  python main.py bookmarks.html -o bookmarks_organized.xlsx
 """,
     )
-    parser.add_argument("input", help="Path to bookmarks HTML file (Netscape format)")
-    parser.add_argument("-o", "--output", default="bookmarks_organized.html", help="Output file path (default: bookmarks_organized.html)")
+    parser.add_argument("input", help="Path to input bookmarks file (.html or .xlsx)")
+    parser.add_argument("-o", "--output", default=None, help="Output file path (.html or .xlsx)")
+    parser.add_argument("--to-excel", nargs="?", const="bookmarks.xlsx", default=None, help="Export input to an Excel spreadsheet (.xlsx) for manual cleanup")
+    parser.add_argument("--from-excel", nargs="?", const="bookmarks.html", default=None, help="Convert an Excel spreadsheet back to Netscape HTML format")
+    parser.add_argument("--no-ai", action="store_true", help="Skip AI categorization and just convert formats between HTML and Excel")
+    parser.add_argument("--preserve-toolbar", action="store_true", help="Keep bookmarks placed directly on the Bookmarks Bar intact (preserves shortened titles)")
     parser.add_argument("--uncategorized-only", action="store_true", help="Only sort bookmarks in the 'Uncategorized' folder")
+    parser.add_argument("--provider", choices=["auto", "gemini", "openai"], default=None, help="LLM provider: gemini or openai (default: auto-detected)")
     parser.add_argument("--model", default=None, help="Model to use (overrides .env and config)")
-    parser.add_argument("--base-url", default=None, help="API base URL (overrides .env)")
+    parser.add_argument("--base-url", default=None, help="API base URL for OpenAI-compatible providers (overrides .env)")
     parser.add_argument("--api-key", default=None, help="API key (overrides .env)")
     parser.add_argument("--max-categories", type=int, default=None, help="Max categories to create")
     parser.add_argument("--batch-size", type=int, default=None, help="Bookmarks per LLM batch")
@@ -48,18 +61,26 @@ def main():
         with open(config_path) as f:
             config = yaml.safe_load(f) or {}
 
-    # Resolve settings (CLI > env > config > defaults)
-    api_key = args.api_key or os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY")
-    base_url = args.base_url or os.getenv("BASE_URL", "https://api.openai.com/v1")
-    model = args.model or os.getenv("MODEL", config.get("model", "gpt-4o-mini"))
     max_categories = args.max_categories or config.get("max_categories", 20)
     batch_size = args.batch_size or config.get("batch_size", 10)
     protected_folders = config.get("protected_folders", [])
+    preserve_toolbar = args.preserve_toolbar or config.get("preserve_toolbar", False)
+    root_folder = config.get("root_folder", "Bookmarks bar")
 
-    if not api_key:
-        print("Error: No API key provided.")
-        print("Set API_KEY in .env, pass --api-key, or set OPENAI_API_KEY environment variable.")
-        sys.exit(1)
+    # Parse suggested_categories from config (supports list or comma-separated string)
+    suggested_raw = config.get("suggested_categories", [])
+    if isinstance(suggested_raw, str):
+        suggested_list = [c.strip().strip("`").strip("'").strip('"') for c in suggested_raw.split(",") if c.strip()]
+    elif isinstance(suggested_raw, list):
+        suggested_list = [str(c).strip().strip("`").strip("'").strip('"') for c in suggested_raw if str(c).strip()]
+    else:
+        suggested_list = []
+    
+    suggested_categories = []
+    for sc in suggested_list:
+        clean = sc.rstrip("/*").rstrip("/*").strip()
+        if clean and clean not in suggested_categories:
+            suggested_categories.append(clean)
 
     # Read input file
     input_path = Path(args.input)
@@ -67,11 +88,64 @@ def main():
         print(f"Error: File not found: {input_path}")
         sys.exit(1)
 
-    print(f"Reading bookmarks from: {input_path}")
-    html_content = input_path.read_text(encoding="utf-8")
+    # Determine input type
+    is_input_excel = input_path.suffix.lower() in (".xlsx", ".xlsm")
 
-    # Parse bookmarks
-    root = parse_bookmarks(html_content)
+    print(f"Reading bookmarks from: {input_path}")
+    if is_input_excel:
+        root = import_bookmarks_from_excel(input_path)
+    else:
+        html_content = input_path.read_text(encoding="utf-8")
+        root = parse_bookmarks(html_content)
+
+    # Quick export to Excel (--to-excel)
+    if args.to_excel:
+        excel_out = Path(args.to_excel)
+        export_bookmarks_to_excel(root, excel_out)
+        print(f"Successfully exported bookmarks to Excel: {excel_out}")
+        print("Open in Excel to review, sort by date, filter domains, or delete unwanted links.")
+        sys.exit(0)
+
+    # Quick export from Excel (--from-excel)
+    if args.from_excel:
+        html_out = Path(args.from_excel)
+        output_html = write_bookmarks(root)
+        html_out.write_text(output_html, encoding="utf-8")
+        print(f"Successfully converted Excel bookmarks to HTML: {html_out}")
+        sys.exit(0)
+
+    # Determine default output file
+    if args.output:
+        output_path = Path(args.output)
+    else:
+        output_path = Path("bookmarks_organized.xlsx" if is_input_excel and not args.no_ai else "bookmarks_organized.html")
+
+    is_output_excel = output_path.suffix.lower() in (".xlsx", ".xlsm")
+
+    # If --no-ai is specified, just write the parsed tree directly to output
+    if args.no_ai:
+        if is_output_excel:
+            export_bookmarks_to_excel(root, output_path)
+            print(f"Saved bookmarks to Excel (without AI): {output_path}")
+        else:
+            output_html = write_bookmarks(root)
+            output_path.write_text(output_html, encoding="utf-8")
+            print(f"Saved bookmarks to HTML (without AI): {output_path}")
+        sys.exit(0)
+
+    # Initialize LLM client for AI categorization
+    try:
+        client, provider, model = create_llm_client(
+            provider=args.provider or config.get("provider"),
+            api_key=args.api_key,
+            model=args.model or config.get("model"),
+            base_url=args.base_url,
+        )
+    except ValueError as e:
+        print(f"Error: {e}")
+        print("Set GEMINI_API_KEY or API_KEY in .env, or pass --api-key.")
+        print("(Hint: Use --no-ai or --to-excel to convert between HTML and Excel without an API key)")
+        sys.exit(1)
 
     # Extract bookmarks based on mode
     if args.uncategorized_only:
@@ -80,7 +154,13 @@ def main():
         existing_categories = [f.title for f in kept_folders]
     else:
         print("Mode: Organizing all bookmarks")
-        bookmarks, kept_folders = extract_all_bookmarks(root, protected_folders)
+        if preserve_toolbar:
+            print("Toolbar Preservation: Direct bookmarks on 'Bookmarks bar' will be kept intact")
+        bookmarks, kept_folders = extract_all_bookmarks(
+            root,
+            protected_folders,
+            preserve_toolbar=preserve_toolbar,
+        )
         existing_categories = []
 
     if not bookmarks:
@@ -88,13 +168,17 @@ def main():
         sys.exit(0)
 
     print(f"Found {len(bookmarks)} bookmarks to organize")
-    print(f"Protected folders: {[f.title for f in kept_folders]}")
+    if kept_folders:
+        print(f"Protected/Preserved folders: {[f.title for f in kept_folders]}")
+    print(f"Provider: {provider}")
     print(f"Using model: {model}")
-    print(f"API base: {base_url}")
+    if provider == "openai":
+        base_url = getattr(client, "base_url", "https://api.openai.com/v1")
+        print(f"API base: {base_url}")
     print()
 
     # Check for saved progress
-    progress_path = get_progress_path(args.output)
+    progress_path = get_progress_path(str(output_path))
     start_index = 0
     resumed_categories = None
 
@@ -112,9 +196,6 @@ def main():
     else:
         clear_progress(progress_path)
 
-    # Initialize OpenAI client
-    client = OpenAI(api_key=api_key, base_url=base_url)
-
     # Organize bookmarks (with graceful interrupt handling)
     print("Categorizing bookmarks...")
     try:
@@ -125,6 +206,7 @@ def main():
             max_categories=max_categories,
             batch_size=batch_size,
             existing_categories=existing_categories,
+            suggested_categories=suggested_categories,
             progress_path=progress_path,
             start_index=start_index,
             resumed_categories=resumed_categories,
@@ -139,12 +221,18 @@ def main():
         print(f"  {cat}: {len(bms)} bookmarks")
 
     # Build output tree
-    organized = build_organized_tree(categories, kept_folders)
+    organized = build_organized_tree(
+        categories=categories,
+        protected_folders=kept_folders,
+        root_folder_name=root_folder,
+    )
 
-    # Write output
-    output_html = write_bookmarks(organized)
-    output_path = Path(args.output)
-    output_path.write_text(output_html, encoding="utf-8")
+    # Write output (HTML or Excel depending on extension)
+    if is_output_excel:
+        export_bookmarks_to_excel(organized, output_path)
+    else:
+        output_html = write_bookmarks(organized)
+        output_path.write_text(output_html, encoding="utf-8")
 
     # Clean up progress file on success
     clear_progress(progress_path)

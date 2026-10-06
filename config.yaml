@@ -1,5 +1,30 @@
+# Provider configuration (auto, gemini, or openai)
+provider: auto
+
+# Gemini configuration
+gemini_model: gemini-3.8-flash
+
+# OpenAI / OpenAI-compatible configuration
+model: gpt-4o-mini
+
+# Categorization options
 max_categories: 20
 batch_size: 10
+preserve_toolbar: true  # Keep bookmarks directly on the Bookmarks Bar intact (preserves short titles)
+root_folder: Bookmarks bar  # Keep organized folders within the Bookmarks Bar
+toolbar_Bookmarks_max_length: 6
+toolbar_max_folders: 8
+toolbar_max_folder_Nesting: 4
+
 protected_folders:
   - Favorites
   - Reading List
+
+# User-defined suggested categories for AI to prioritize
+suggested_categories:
+  - Bookmarks bar/AI Prompts
+  - Bookmarks bar/Finance
+  - Bookmarks bar/Finance/Crypto
+  - Bookmarks bar/Finance/Credit
+  - Bookmarks bar/GIS & Mapping
+  - Bookmarks bar/Employment
