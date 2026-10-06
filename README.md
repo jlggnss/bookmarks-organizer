@@ -2,6 +2,8 @@
 
 ![Bookmarks Organizer](/header.png)
 
+Forked from https://github.com/rb81/bookmarks-organizer who did most of the the work and and share his groundwork.  
+
 AI-powered bookmark organizer that reads your exported bookmarks (Netscape format), categorizes them into folders using **Google Gemini** or any **OpenAI-compatible LLM**, supports **interactive Excel curation & cleanup**, and exports them back — ready to import into any browser.
 
 ## Features
